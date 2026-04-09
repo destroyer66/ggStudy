@@ -281,7 +281,7 @@ class SideMenuApp(App):
         # 延时一点时间执行，确保窗口已经创建
         Clock.schedule_once(lambda dt: make_window_transparent(), 0.1)
         
-        return MainMenu()
+        return MainMenu()  #1111
 
 if __name__ == '__main__':
     SideMenuApp().run()
