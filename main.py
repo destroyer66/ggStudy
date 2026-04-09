@@ -13,8 +13,8 @@ Config.set('graphics', 'resizable', '0')
 Config.set('graphics', 'position', 'custom')
 Config.set('graphics', 'left', '0')
 Config.set('graphics', 'top', '50')
-Config.set('graphics', 'width', '70')
-Config.set('graphics', 'height', '230')
+Config.set('graphics', 'width', '80')
+Config.set('graphics', 'height', '320')
 Config.set('graphics', 'always_on_top', '1')
 Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
 
@@ -411,17 +411,17 @@ class MainMenu(FloatLayout):
         Window.bind(size=self._on_window_size)
 
         btn_size = dp(60)
-        padding = dp(5)
-        spacing = dp(15)
+        padding = dp(10)
+        spacing = dp(35) # 增大间距
 
         self.btn_scissor = RoundButton(
             icon_type='scissor',
-            pos=(padding, spacing * 2 + btn_size * 2),
+            pos=(padding, spacing * 2 + btn_size * 2 + padding),
             base_color=[1, 0.4, 0.4, 0.98]
         )
         self.btn_whiteboard = RoundButton(
             icon_type='whiteboard',
-            pos=(padding, spacing + btn_size),
+            pos=(padding, spacing + btn_size + padding),
             base_color=[0.4, 0.9, 0.4, 0.98]
         )
         self.btn_album = RoundButton(
