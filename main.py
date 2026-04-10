@@ -1,12 +1,14 @@
 import os
 import sys
 import platform
+import threading
 
 # SDL2 设置
 os.environ['KIVY_WINDOW'] = 'sdl2'
 
 from kivy.config import Config
 Config.set('graphics', 'multisamples', '0')
+Config.set('graphics', 'dpi', '96')
 Config.set('graphics', 'borderless', '1')
 Config.set('graphics', 'resizable', '0')
 Config.set('graphics', 'position', 'custom')
@@ -31,13 +33,16 @@ from kivy.properties import StringProperty, ListProperty, BooleanProperty, Numer
 from kivy.metrics import dp
 from kivy.clock import Clock
 
-# 目标窗口大小和位置
-TARGET_WIDTH = 80
-TARGET_HEIGHT = 320
-TARGET_LEFT = 0
-TARGET_TOP = 50
+# 导入截图编辑模块
+import scissor
 
-# 定义自定义着色器
+# 目标窗口大小和位置
+TARGET_WIDTH = 68   # 窗口宽度：按钮48 + 左右padding各10
+TARGET_HEIGHT = 244 # 窗口高度：3按钮(144) + 2间距(80) + 上下padding(20)
+TARGET_LEFT = 0
+TARGET_TOP = 100  # 向下移动50像素
+
+# 定义自定义着色器 - 支持边框
 ROUND_BUTTON_FRAG = """
 #ifdef GL_ES
     precision highp float;
@@ -47,6 +52,8 @@ varying vec4 frag_color;
 varying vec2 tex_coord0;
 
 uniform vec4 base_color;
+uniform vec4 border_color;
+uniform float border_width;
 uniform float hover_factor;
 uniform sampler2D texture0;
 uniform float has_texture;
@@ -56,13 +63,23 @@ void main() {
     float dist = length(uv);
     
     float fw = fwidth(dist);
-    float alpha = 1.0 - smoothstep(1.0 - fw * 2.0, 1.0 + fw * 0.5, dist);
+    // 极锐利的边缘过渡，最小化过渡区域
+    float alpha = 1.0 - smoothstep(1.0 - fw * 0.05, 1.0 + fw * 0.02, dist);
     
     if (alpha <= 0.001) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
+    
+    // 边框逻辑：根据距离判断是否在边框区域
+    float inner_radius = 1.0 - border_width;
+    float in_border = 1.0 - smoothstep(inner_radius - fw, inner_radius + fw, dist);
+    
+    // 混合边框颜色和主体颜色
+    vec3 color_rgb = mix(border_color.rgb, base_color.rgb, in_border);
+    float final_alpha = base_color.a;
 
+    // 光照模型
     vec3 light_pos = vec3(-0.4, 0.4, 1.0);
     float z = sqrt(max(0.0, 1.0 - dot(uv, uv)));
     vec3 normal = normalize(vec3(uv, z));
@@ -74,7 +91,6 @@ void main() {
     float ambient = 0.35;
     float rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 3.0) * 0.4;
     
-    vec3 color_rgb = base_color.rgb;
     vec3 final_color = color_rgb * (diff + ambient) + vec3(spec * 0.5) + vec3(rim);
     final_color += hover_factor * 0.12;
 
@@ -87,7 +103,7 @@ void main() {
         }
     }
     
-    gl_FragColor = vec4(final_color, alpha * base_color.a);
+    gl_FragColor = vec4(final_color, alpha * final_alpha);
 }
 """
 
@@ -112,6 +128,32 @@ def setup_transparent_window():
     user32 = ctypes.windll.user32
     dwmapi = ctypes.windll.dwmapi
     kernel32 = ctypes.windll.kernel32
+    
+    # 启用DPI感知（Per Monitor V2）
+    try:
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+    except:
+        try:
+            user32.SetProcessDPIAware()
+        except:
+            pass
+    
+    # 计算屏幕右侧位置（使用工作区，排除任务栏）
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", wintypes.LONG),
+            ("top", wintypes.LONG),
+            ("right", wintypes.LONG),
+            ("bottom", wintypes.LONG)
+        ]
+    
+    work_area = RECT()
+    # SPI_GETWORKAREA = 0x0030
+    user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_area), 0)
+    
+    # 计算右侧位置，留出40像素边距确保不超出屏幕
+    target_left = work_area.right - TARGET_WIDTH - 40
 
     def find_hwnd():
         hwnd_local = user32.FindWindowW(None, "SideMenu")
@@ -177,8 +219,9 @@ def setup_transparent_window():
         new_style = (current_style & ~(WS_CAPTION | WS_THICKFRAME)) | WS_POPUP
         user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
         
-        # 设置黑色为透明色键
-        user32.SetLayeredWindowAttributes(hwnd, 0x00000000, 255, LWA_COLORKEY)
+        # 设置黑色为透明色键，同时设置整体透明度（200/255 = 78%不透明）
+        LWA_ALPHA = 0x00000002
+        user32.SetLayeredWindowAttributes(hwnd, 0x00000000, 200, LWA_COLORKEY | LWA_ALPHA)
         
         # 先移动到目标位置并设置目标大小（但保持隐藏）
         SWP_FRAMECHANGED = 0x0020
@@ -190,7 +233,7 @@ def setup_transparent_window():
         user32.SetWindowPos(
             hwnd, 
             0,  # 不改变Z序
-            TARGET_LEFT, TARGET_TOP, 
+            target_left, TARGET_TOP, 
             TARGET_WIDTH, TARGET_HEIGHT,
             SWP_FRAMECHANGED | SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOZORDER
         )
@@ -217,7 +260,7 @@ def setup_transparent_window():
         user32.InvalidateRect(hwnd, None, True)
         user32.UpdateWindow(hwnd)
         
-        print(f"窗口已设置: 位置({TARGET_LEFT}, {TARGET_TOP}), 大小({TARGET_WIDTH}, {TARGET_HEIGHT})")
+        print(f"窗口已设置: 位置({target_left}, {TARGET_TOP}), 大小({TARGET_WIDTH}, {TARGET_HEIGHT})")
         
         # 延迟显示窗口，确保一切准备就绪
         def show_window(dt):
@@ -240,6 +283,7 @@ def setup_transparent_window():
 class RoundButton(ButtonBehavior, FloatLayout):
     icon_type = StringProperty('scissor')
     base_color = ListProperty([0.2, 0.6, 1, 0.95])
+    border_color = ListProperty([0.1, 0.3, 0.6, 1.0])  # 边框颜色，默认深色
     hovered = BooleanProperty(False)
     scale = NumericProperty(1.0)
     hover_factor = NumericProperty(0.0)
@@ -250,7 +294,7 @@ class RoundButton(ButtonBehavior, FloatLayout):
 
         super(RoundButton, self).__init__(**kwargs)
         self.size_hint = (None, None)
-        self.size = (dp(60), dp(60))
+        self.size = (dp(48), dp(48))  # 按钮大小48dp
 
         icon_path = resource_path(os.path.join('assets', f'{self.icon_type}.png'))
         from kivy.core.image import Image as CoreImage
@@ -262,7 +306,7 @@ class RoundButton(ButtonBehavior, FloatLayout):
         self.bind(
             pos=self.update_canvas, size=self.update_canvas,
             base_color=self.update_canvas, hover_factor=self.update_canvas,
-            scale=self.update_canvas
+            scale=self.update_canvas, border_color=self.update_canvas
         )
 
     def on_mouse_pos(self, window, pos):
@@ -283,7 +327,11 @@ class RoundButton(ButtonBehavior, FloatLayout):
             Animation(scale=1.0, hover_factor=0.0, duration=0.2, t='out_quad').start(self)
 
     def update_canvas(self, *args):
+        # 设置 shader 参数
         self.canvas['base_color'] = [float(c) for c in self.base_color]
+        self.canvas['border_color'] = [float(c) for c in self.border_color]
+        # 边框宽度：2像素相对于60dp按钮的比率
+        self.canvas['border_width'] = float(dp(2) / (self.size[0] * self.scale) * 2.0)
         self.canvas['hover_factor'] = float(self.hover_factor)
         self.canvas['has_texture'] = 1.0 if self._texture else 0.0
 
@@ -291,8 +339,15 @@ class RoundButton(ButtonBehavior, FloatLayout):
         with self.canvas:
             w, h = self.size[0] * self.scale, self.size[1] * self.scale
             cx, cy = self.center
-            new_pos = (cx - w / 2, cy - h / 2)
-            new_size = (w, h)
+            
+            # 扩大渲染尺寸，让边缘抗锯齿部分超出可见区域
+            overscan = dp(8)  # 每边多渲染8像素
+            render_w = w + overscan * 2
+            render_h = h + overscan * 2
+            new_pos = (cx - render_w / 2, cy - render_h / 2)
+            new_size = (render_w, render_h)
+            
+            # 绘制按钮（shader 会处理边框和主体）
             Color(1, 1, 1, 1)
             Rectangle(pos=new_pos, size=new_size, texture=self._texture)
 
@@ -350,10 +405,18 @@ class RoundButton(ButtonBehavior, FloatLayout):
         self.opacity = 1.0
         if self.icon_type == 'scissor':
             print("触发：截屏编辑功能")
+            self.trigger_screenshot()
         elif self.icon_type == 'whiteboard':
             print("触发：白板绘图功能")
         elif self.icon_type == 'album':
             print("触发：相册管理功能")
+
+    def trigger_screenshot(self):
+        """触发截图编辑功能"""
+        # 获取主应用实例
+        app = App.get_running_app()
+        # 切换到截图编辑界面
+        app.show_screenshot_editor()
 
 
 class MainMenu(FloatLayout):
@@ -361,30 +424,40 @@ class MainMenu(FloatLayout):
         super(MainMenu, self).__init__(**kwargs)
         
         with self.canvas.before:
-            Color(0, 0, 0, 1)
+            Color(0, 0, 0, 1)  # 黑色背景，将被Windows色键扣除为透明
             self.bg_rect = Rectangle(pos=(0, 0), size=Window.size)
         
         self.bind(pos=self._update_bg, size=self._update_bg)
         Window.bind(size=self._on_window_size)
 
-        btn_size = dp(60)
+        btn_size = dp(48)  # 按钮大小改为48dp
         padding = dp(10)
-        spacing = dp(35)
+        spacing = dp(40)   # 间距等于按钮大小
 
+        # 三个按钮颜色：从上到下依次为偏红、偏蓝、偏绿
+        # 重新计算位置，确保按钮完整显示
+        # 从底部开始：padding + 按钮 + 间距 + 按钮 + 间距 + 按钮
+        btn1_y = padding + spacing * 2 + btn_size * 2  # 最上面的按钮
+        btn2_y = padding + spacing + btn_size          # 中间的按钮
+        btn3_y = padding                               # 最下面的按钮
+        
         self.btn_scissor = RoundButton(
             icon_type='scissor',
-            pos=(padding, spacing * 2 + btn_size * 2 + padding),
-            base_color=[1, 0.4, 0.4, 0.98]
+            pos=(padding, btn1_y),
+            base_color=[0.95, 0.35, 0.35, 0.98],  # 偏红色
+            border_color=[0.7, 0.2, 0.2, 1.0]     # 深红色边框
         )
         self.btn_whiteboard = RoundButton(
             icon_type='whiteboard',
-            pos=(padding, spacing + btn_size + padding),
-            base_color=[0.4, 0.9, 0.4, 0.98]
+            pos=(padding, btn2_y),
+            base_color=[0.35, 0.55, 0.95, 0.98],  # 偏蓝色
+            border_color=[0.2, 0.35, 0.7, 1.0]    # 深蓝色边框
         )
         self.btn_album = RoundButton(
             icon_type='album',
-            pos=(padding, padding),
-            base_color=[0.4, 0.4, 1, 0.98]
+            pos=(padding, btn3_y),
+            base_color=[0.35, 0.85, 0.45, 0.98],  # 偏绿色
+            border_color=[0.2, 0.6, 0.3, 1.0]     # 深绿色边框
         )
         self.add_widget(self.btn_scissor)
         self.add_widget(self.btn_whiteboard)
@@ -400,10 +473,87 @@ class MainMenu(FloatLayout):
 
 class SideMenuApp(App):
     def build(self):
-        Window.clearcolor = (0, 0, 0, 1)
+        Window.clearcolor = (0, 0, 0, 1)  # 黑色背景作为透明色键
         # 立即启动透明设置（窗口初始在屏幕外且很小）
         setup_transparent_window()
-        return MainMenu()
+        
+        # 创建根布局，用于切换主菜单和截图编辑器
+        self.root_layout = FloatLayout()
+        
+        # 创建主菜单
+        self.main_menu = MainMenu()
+        self.root_layout.add_widget(self.main_menu)
+        
+        # 截图编辑器（初始不存在）
+        self.screenshot_editor = None
+        
+        return self.root_layout
+    
+    def show_screenshot_editor(self):
+        """显示截图编辑界面"""
+        # 先隐藏窗口（避免捕捉到主窗口）
+        Window.hide()
+        
+        # 移除主菜单
+        self.root_layout.remove_widget(self.main_menu)
+        
+        # 延迟创建截图编辑器，确保窗口已隐藏
+        def create_editor(dt):
+            self.screenshot_editor = scissor.create_screenshot_editor(
+                on_complete=self.show_main_menu
+            )
+            self.root_layout.add_widget(self.screenshot_editor)
+        
+        Clock.schedule_once(create_editor, 0.2)
+    
+    def show_main_menu(self):
+        """显示主菜单界面"""
+        # 移除截图编辑器
+        if self.screenshot_editor:
+            self.root_layout.remove_widget(self.screenshot_editor)
+            self.screenshot_editor = None
+        
+        # 添加主菜单
+        self.root_layout.add_widget(self.main_menu)
+        
+        # 计算屏幕右侧位置（使用工作区，排除任务栏）
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG)
+            ]
+        
+        work_area = RECT()
+        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_area), 0)
+        
+        # 计算右侧位置，留出40像素边距确保不超出屏幕
+        target_left = work_area.right - TARGET_WIDTH - 40
+        
+        # 恢复窗口大小和位置
+        Window.size = (TARGET_WIDTH, TARGET_HEIGHT)
+        Window.left = target_left
+        Window.top = TARGET_TOP
+        Window.fullscreen = False
+        
+        # 显示窗口
+        Window.show()
+        
+        # 重新设置置顶
+        Clock.schedule_once(self._restore_topmost, 0.2)
+    
+    def _restore_topmost(self, dt):
+        """恢复窗口置顶"""
+        if GLOBAL_HWND:
+            import ctypes
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos(GLOBAL_HWND, -1, 0, 0, 0, 0, 
+                               0x0002 | 0x0001 | 0x0010 | 0x0040)
 
 
 if __name__ == '__main__':
