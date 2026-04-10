@@ -121,7 +121,7 @@ class DraggableShape:
             x1, y1 = self.current_start
             x2, y2 = self.current_end
             return [
-                ('tl', [x1, y2]),  # 左上（注意：y轴方向）
+                ('tl', [x1, y2]),  # 左上
                 ('tr', [x2, y2]),  # 右上
                 ('br', [x2, y1]),  # 右下
                 ('bl', [x1, y1]),  # 左下
@@ -156,27 +156,27 @@ class DraggableShape:
                 
         else:
             # 矩形/圆形/三角形：四个角，锁定对角
-            x1, y1 = self.current_start
-            x2, y2 = self.current_end
+            # 定义：current_start 为左下 (bl), current_end 为右上 (tr)
+            # 实际实现中，current_start 为起点，current_end 为终点
+            # 按照 get_handle_positions 的定义：
+            # tl: (x1, y2), tr: (x2, y2), br: (x2, y1), bl: (x1, y1)
             
             if handle == 'tl':
-                # 左上：锁定右下(x2,y2)
-                self.current_start = [nx, ny]
-                # 保持对角点不变
-                self.current_end = [x2, y2]
+                # 左上 (x1, y2)：锁定右下 (x2, y1)
+                self.current_start[0] = nx
+                self.current_end[1] = ny
             elif handle == 'tr':
-                # 右上：锁定左下(x1,y2)
-                self.current_start = [x1, ny]
-                self.current_end = [nx, y2]
+                # 右上 (x2, y2)：锁定左下 (x1, y1)
+                self.current_end[0] = nx
+                self.current_end[1] = ny
             elif handle == 'br':
-                # 右下：锁定左上(x1,y1)
-                self.current_end = [nx, ny]
-                # 保持对角点不变
-                self.current_start = [x1, y1]
+                # 右下 (x2, y1)：锁定左上 (x1, y2)
+                self.current_end[0] = nx
+                self.current_start[1] = ny
             elif handle == 'bl':
-                # 左下：锁定右上(x2,y1)
-                self.current_start = [nx, y1]
-                self.current_end = [x2, ny]
+                # 左下 (x1, y1)：锁定右上 (x2, y2)
+                self.current_start[0] = nx
+                self.current_start[1] = ny
     
     def get_render_points(self):
         """获取渲染用的点（应用所有变换）"""
@@ -741,20 +741,47 @@ class ScreenshotEditor(FloatLayout):
         Window.bind(on_resize=self.on_window_resize)
     
     def setup_color_palette(self):
-        self.color_palette = BoxLayout(
+        # 使用 FloatLayout 代替 BoxLayout 以便灵活控制按钮位置和背景
+        self.color_palette = FloatLayout(
             size_hint=(None, None),
-            size=(dp(500), dp(30)),
-            pos=(dp(20), dp(20)),
-            spacing=dp(2)
+            size=(dp(400), dp(200)),
+            pos=(Window.width / 2 - dp(200), -dp(100))  # 放在底部中间，向下偏离，只露出一半
         )
         
-        for color_hex in PRESET_COLORS:
+        # 为调色板添加半圆背景
+        with self.color_palette.canvas.before:
+            Color(0.2, 0.2, 0.2, 0.8)
+            self.palette_bg = Ellipse(
+                pos=self.color_palette.pos,
+                size=self.color_palette.size
+            )
+        
+        # 绑定位置更新以保持居中和圆心一致
+        def update_palette_pos(instance, pos):
+            self.palette_bg.pos = pos
+            self.palette_bg.size = instance.size
+        self.color_palette.bind(pos=update_palette_pos, size=update_palette_pos)
+
+        # 扇形分布按钮
+        radius = dp(140)
+        center_x = dp(200)
+        center_y = dp(100)
+        
+        for i, color_hex in enumerate(PRESET_COLORS):
+            # 将 0-180 度分布
+            angle = math.radians(180 - (i * (180 / (len(PRESET_COLORS) - 1))))
+            bx = center_x + radius * math.cos(angle) - dp(15)
+            by = center_y + radius * math.sin(angle) - dp(15)
+            
             btn = Button(
                 background_normal='',
                 background_color=get_color_from_hex(color_hex),
-                size_hint_x=None,
-                width=dp(46)
+                size_hint=(None, None),
+                size=(dp(30), dp(30)),
+                pos=(bx, by)
             )
+            # 在 Kivy 中，子部件位置是相对于父部件的
+            btn.pos = (bx, by)
             btn.bind(on_press=lambda b, c=color_hex: self.set_color(c))
             self.color_palette.add_widget(btn)
         
@@ -762,6 +789,8 @@ class ScreenshotEditor(FloatLayout):
     
     def on_window_resize(self, instance, w, h):
         self.top_menu.pos = (dp(20), h - dp(70))
+        # 更新调色板位置
+        self.color_palette.pos = (w / 2 - dp(200), -dp(100))
     
     def update_time(self, *args):
         self.time_label.text = datetime.now().strftime('%H:%M:%S')
