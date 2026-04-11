@@ -202,7 +202,7 @@ class DraggableShape:
     """可拖拽的形状对象 - 基于手柄矩形的变换系统"""
     
     def __init__(self, shape_type, start_pos, end_pos, 
-                 color=(1, 0, 0, 1), line_width=2, line_style='solid'):
+                 color=(1, 0, 0, 1), line_width=2, line_style='solid', pressures=None):
         self.shape_type = shape_type
         # 原始手柄位置（定义控制矩形）
         self.original_start = list(start_pos) if start_pos else [0, 0]
@@ -212,6 +212,8 @@ class DraggableShape:
         
         # 自由画笔的点列表（相对于original_start的偏移）
         self.points = []
+        # 压力列表（0.0 到 1.0）
+        self.pressures = pressures if pressures else []
         
         if shape_type == 'free' and isinstance(end_pos, (list, tuple)) and len(end_pos) > 2:
             # 自由画：end_pos是点列表 [x1,y1,x2,y2,...]
@@ -220,6 +222,11 @@ class DraggableShape:
                 px = end_pos[i] - base_x
                 py = end_pos[i+1] - base_y
                 self.points.append([px, py])
+            
+            # 如果没有提供压力，则默认为 1.0
+            if not self.pressures:
+                self.pressures = [1.0] * (len(end_pos) // 2)
+            
             # original_end设为最后一个点
             self.original_end = [end_pos[-2], end_pos[-1]] if len(end_pos) >= 2 else list(self.original_start)
             self.current_end = list(self.original_end)
@@ -513,6 +520,22 @@ class DrawingCanvas(FloatLayout):
             if len(pts) >= 4:
                 if shape.line_style == 'dashed':
                     self._draw_dashed_line(instr_group, pts, shape.line_width)
+                elif hasattr(shape, 'pressures') and shape.pressures and len(shape.pressures) * 2 == len(pts):
+                    # 压感绘制：分段绘制不同粗细的线段
+                    # 使用 Line 指令的分段绘制可能不如直接绘制多个小 Line 指令平滑，
+                    # 但 Kivy 的 Line 宽度是全局的。所以我们需要多个 Line 指令。
+                    for i in range(len(shape.pressures) - 1):
+                        p1_x, p1_y = pts[i*2], pts[i*2+1]
+                        p2_x, p2_y = pts[(i+1)*2], pts[(i+1)*2+1]
+                        # 提高压感对比度：
+                        # 使用更温和的压力感应映射，避免宽度过大
+                        # 映射范围：0.6x 到 1.8x 基础宽度，平衡感官和真实宽度
+                        press = (shape.pressures[i] + shape.pressures[i+1]) / 2.0
+                        # 经过处理，压力感应在合理范围内波动
+                        press_sq = press * press
+                        curr_width = shape.line_width * (0.6 + 1.2 * press_sq)
+                        instr_group.add(Line(points=[p1_x, p1_y, p2_x, p2_y], 
+                                           width=curr_width, cap='round', joint='round'))
                 else:
                     instr_group.add(Line(points=pts, width=shape.line_width, cap='round', joint='round'))
                 
@@ -894,8 +917,10 @@ class ScreenshotEditor(FloatLayout):
         self.on_complete = on_complete
         self.screenshot_path = None
         self.drawing = False
+        self._touch = None  # 记录当前正在绘图的 touch 对象
         self.start_pos = None
         self.temp_points = []
+        self.temp_pressures = []  # 临时存储压感数据
         self.selected_shape = None
         self.moving = False
         self.resizing = False
@@ -1161,6 +1186,10 @@ class ScreenshotEditor(FloatLayout):
         if self._check_ui_collision(touch.pos):
             return super().on_touch_down(touch)
         
+        # 如果已经在绘图中，忽略其他的 touch_down，防止多指导致的数据紊乱
+        if self.drawing or self.moving or self.resizing:
+            return True
+
         if self.tool_mode == 'select':
             # 优先检查是否点击了当前选中对象的手柄
             if self.drawing_canvas.selection_handle.shape:
@@ -1170,6 +1199,8 @@ class ScreenshotEditor(FloatLayout):
                     self.resize_handle = handle
                     self.resizing = True
                     self.moving = False
+                    self._touch = touch
+                    touch.grab(self)
                     return True
             
             # 检查是否点击了某个对象
@@ -1191,6 +1222,8 @@ class ScreenshotEditor(FloatLayout):
                     self.moving = True
                     self.resizing = False
                     self.last_touch = touch.pos
+                self._touch = touch
+                touch.grab(self)
             else:
                 self.drawing_canvas.deselect()
                 self.selected_shape = None
@@ -1200,15 +1233,29 @@ class ScreenshotEditor(FloatLayout):
         
         elif self.tool_mode == 'eraser':
             self.drawing_canvas.erase_at(touch.pos)
+            self._touch = touch
+            touch.grab(self)
             return True
         
         else:
             self.drawing = True
+            self._touch = touch
+            touch.grab(self)
             self.start_pos = list(touch.pos)
             self.temp_points = [touch.x, touch.y]
+            # 默认不启用压感，除非确定有压力
+            pressure = 0.5
+            try:
+                pressure = getattr(touch, 'pressure', 0.5)
+            except:
+                pass
+            self.temp_pressures = [pressure]
             return True
     
     def on_touch_move(self, touch):
+        if touch.grab_current is not self:
+            return super().on_touch_move(touch)
+            
         if self.tool_mode == 'select' and self.selected_shape:
             if self.resizing and self.resize_handle:
                 self.drawing_canvas.resize_shape(self.selected_shape, self.resize_handle, (touch.x, touch.y))
@@ -1225,14 +1272,26 @@ class ScreenshotEditor(FloatLayout):
         
         elif self.drawing:
             self.temp_points.extend([touch.x, touch.y])
+            # 获取当前移动点的压感
+            pressure = 0.5
+            try:
+                pressure = getattr(touch, 'pressure', 0.5)
+            except:
+                pass
+            self.temp_pressures.append(pressure)
+            
             if self.shape_mode == 'free':
                 # 复制列表避免引用问题
                 preview_end = list(self.temp_points)
+                preview_pressures = list(self.temp_pressures)
             else:
                 preview_end = [touch.x, touch.y]
+                preview_pressures = None
+            
             preview = DraggableShape(
                 self.shape_mode, self.start_pos, preview_end,
-                color=list(self.current_color), line_width=self.line_width, line_style=self.line_style
+                color=list(self.current_color), line_width=self.line_width, line_style=self.line_style,
+                pressures=preview_pressures
             )
             self.drawing_canvas.render_shape(preview, is_preview=True)
             return True
@@ -1240,6 +1299,12 @@ class ScreenshotEditor(FloatLayout):
         return super().on_touch_move(touch)
     
     def on_touch_up(self, touch):
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            self._touch = None
+        else:
+            return super().on_touch_up(touch)
+
         if self.tool_mode == 'select':
             self.moving = False
             self.resizing = False
@@ -1257,13 +1322,21 @@ class ScreenshotEditor(FloatLayout):
                 self.drawing_canvas.preview_instruction = None
             
             # 复制列表避免引用问题
-            final_points = list(self.temp_points) if self.shape_mode == 'free' else list(touch.pos)
+            if self.shape_mode == 'free':
+                final_points = list(self.temp_points)
+                final_pressures = list(self.temp_pressures)
+            else:
+                final_points = list(touch.pos)
+                final_pressures = None
+                
             shape = DraggableShape(
                 self.shape_mode, self.start_pos, final_points,
-                color=list(self.current_color), line_width=self.line_width, line_style=self.line_style
+                color=list(self.current_color), line_width=self.line_width, line_style=self.line_style,
+                pressures=final_pressures
             )
             self.drawing_canvas.add_shape(shape)
             self.temp_points = []
+            self.temp_pressures = []
             return True
         
         return super().on_touch_up(touch)
